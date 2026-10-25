@@ -255,12 +255,12 @@ window.addEventListener('pagehide', flush);
 /* ============ Zustand ============ */
 const DEF = () => ({ v:2, start:ymd(new Date()), bar:2.5, sessions:[], mobs:[], body:[], wp:{}, draft:null, summary:null, lastBackup:null,
   eq:Object.fromEntries(PLAN.equip.map(e => [e.id, !!e.own])),
-  custom:[], fav:{}, hide:{}, pref:{}, extras:{A:[],B:[],C:[]}, plates:{'1.25':6,'2.5':4,'5':8,'10':4},
+  shift:0, pause:null, dismissWeek:0, reviewSeen:0, custom:[], fav:{}, hide:{}, pref:{}, extras:{A:[],B:[],C:[]}, plates:{'1.25':6,'2.5':4,'5':8,'10':4},
   cfg:{ age:32, height:168, sex:'m', goal:75, steps:7000, startKg:80.1, variety:'fix', curlBar:4 } });
 let S = DEF();
 function adopt(o){ const d = DEF(); S = Object.assign(d, o, { eq:Object.assign(d.eq, o.eq||{}), cfg:Object.assign(d.cfg, o.cfg||{}), extras:Object.assign(d.extras, o.extras||{}) });
   if(!o.plates){ S.plates = d.plates; S.eq.plates = true; } }
-const UI = { view:'today', arg:null, exSel:null, pick:false, toast:'', q:'', tags:[], flt:{}, fOpen:false, form:null, pq:'', pt:'', pc:'', pm:'db2' };
+const UI = { view:'today', arg:null, exSel:null, pick:false, toast:'', q:'', tags:[], flt:{}, fOpen:false, form:null, pq:'', pt:'', pc:'', pm:'db2', rev:null };
 const has = id => !!S.eq[id];
 const eqName = id => PLAN.equip.find(e => e.id===id).name;
 
@@ -268,8 +268,10 @@ const eqName = id => PLAN.equip.find(e => e.id===id).name;
 const wkInfo = n => PLAN.weeks[Math.min(Math.max(n,1),24)-1];
 const phaseOf = n => PLAN.phases.find(p => p.i === wkInfo(n).phase);
 const monRel = ds => Math.round((mondayOf(parseYmd(ds)) - mondayOf(parseYmd(S.start))) / (7*864e5)) + 1;
-const currentWeek = () => monRel(ymd(new Date()));
-const sessionsInWeek = n => S.sessions.filter(x => monRel(x.date) === n);
+const calNow = () => monRel(ymd(new Date()));
+const currentWeek = () => S.pause ? S.pause.week : calNow() - S.shift;
+const sessionsInWeek = n => S.sessions.filter(x => x.week === n);
+const sessionsThisCalWeek = () => S.sessions.filter(x => monRel(x.date) === calNow());
 function nextSession(){ const last = S.sessions.length ? S.sessions[S.sessions.length-1].type : null; return last ? {A:'B',B:'C',C:'A'}[last] : 'A'; }
 
 /* ---------- Übungszugriff (eingebaut und eigene) ---------- */
@@ -411,7 +413,7 @@ const TABS = [['today','Heute','today'],['plan','Plan','plan'],['exercises','Üb
 function renderNav(){
   const fs = ['workout','player','summary','guide'].includes(UI.view);
   nav.style.display = fs ? 'none' : 'flex'; document.body.classList.toggle('fs', UI.view==='workout');
-  const active = {week:'plan', mobility:'plan', guide:'more', exform:'exercises'}[UI.view] || UI.view;
+  const active = {week:'plan', mobility:'plan', guide:'more', exform:'exercises', review:'progress'}[UI.view] || UI.view;
   nav.innerHTML = TABS.map(([id,l,ic]) => `<button data-a="tab" data-v="${id}" ${active===id?'aria-current="page"':''}>${ICON[ic]}<span>${l}</span></button>`).join('');
 }
 const banner = () => Store.mode==='memory' ? `<div class="banner"><b>Speichern ist hier nicht möglich.</b> Öffne die Datei direkt im Browser (z. B. Chrome), damit deine Einträge erhalten bleiben.</div>` : '';
@@ -421,7 +423,7 @@ function render(){
   if(UI.view==='summary' && !S.summary) UI.view = 'today';
   if(UI.view==='exform' && !UI.form) UI.view = 'exercises';
   renderNav();
-  const v = UI.view, f = {today:vToday, plan:vPlan, week:() => vWeek(UI.arg), progress:vProgress, equip:vEquip, mobility:vMobility, more:vMore, workout:vWorkout, player:vPlayer, summary:vSummary, guide:vGuide, exercises:vExercises, exform:vExForm}[v];
+  const v = UI.view, f = {today:vToday, plan:vPlan, week:() => vWeek(UI.arg), progress:vProgress, equip:vEquip, mobility:vMobility, more:vMore, workout:vWorkout, player:vPlayer, summary:vSummary, guide:vGuide, exercises:vExercises, exform:vExForm, review:vReview}[v];
   app.innerHTML = f();
   if(v==='workout') updateWorkoutProgress();
   if(v==='player') playerTick();
@@ -453,9 +455,18 @@ function vToday(){
       <p class="muted">${w>24?'Dein 24-Wochen-Block ist vorbei. Mach eine Standortbestimmung und wiederhole Phase 5.':`Phase ${ph.i}: ${ph.name} · Monat ${wi.month} · Reserve ${wi.rir}`}</p>`;
     if(wi.deload && w<=24) h += `<div class="banner dl"><b>Entlastungswoche.</b> Nur 2 Sätze, Gewichte etwas leichter. Kein Satz bis ans Limit.</div>`;
   }
+  if(UI.toast) h += `<div class="banner good">${UI.toast}</div>`;
+  if(S.pause) h += `<div class="banner"><b>Plan pausiert</b> seit ${fmtDate(S.pause.since)}. Du bleibst in Woche ${S.pause.week}.<div style="margin-top:8px"><button class="btn sm" data-a="pauseend">Pause beenden</button></div></div>`;
+  else if(w>=2 && calNow()>=2 && S.dismissWeek!==calNow()){
+    const prev = S.sessions.filter(x => monRel(x.date)===calNow()-1).length, late = calNow()-1===1 && ((parseYmd(S.start).getDay()+6)%7) > 2;
+    if(prev<2 && !late) h += `<div class="banner dl"><b>Letzte Woche nur ${prev} von 3 Trainings.</b> Möchtest du die Planwoche wiederholen, damit du nichts überspringst?<div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn sm" data-a="weekback">Woche wiederholen</button><button class="btn ghost sm" data-a="weekkeep">Weiter wie geplant</button></div></div>`;
+  }
   h += platesRow();
-  const done = sessionsInWeek(w).length, mobW = S.mobs.filter(x => monRel(x.date)===w).length;
+  const done = sessionsThisCalWeek().length, mobW = S.mobs.filter(x => monRel(x.date)===calNow()).length;
   h += `<p class="small muted" style="margin:6px 0 12px">Diese Woche: Kraft ${done} von 3 · Mobility ${mobW} Mal</p>`;
+  { const lc = calNow()-1;
+    if(lc>=1 && (S.reviewSeen||0) < lc){ const rd = weekData(lc);
+      if(rd.ses.length || rd.stepN || rd.kgN || rd.mobs) h += `<div class="card stripe cB"><h3>Wochenrückblick bereit</h3><p class="small" style="margin:0 0 8px">Letzte Woche: ${rd.ses.length} von 3 Trainings${rd.prs.length ? ', '+rd.prs.length+' Rekord'+(rd.prs.length===1?'':'e') : ''}${rd.stepAvg!==null ? ', Ø '+fmtInt(rd.stepAvg)+' Schritte' : ''}.</p><button class="btn sm" data-a="review">Ansehen</button></div>`; } }
   if(st.n>0 || Math.abs(st.lost)>=0.1){
     h += `<div class="card"><div class="row sp" style="text-align:center"><div><b style="font-family:var(--head);font-size:1.7rem">${st.n}</b><div class="small muted">Trainings</div></div>
       <div><b style="font-family:var(--head);font-size:1.7rem" class="${st.lost>0?'up':''}">${st.lost>0?'−':st.lost<0?'+':''}${fmt1(Math.abs(st.lost))}</b><div class="small muted">kg seit Start</div></div>
@@ -490,7 +501,7 @@ function vToday(){
 function vPlan(){
   const w = currentWeek();
   let h = `<div class="wrap">${banner()}<h1>Plan</h1><p class="muted">24 Wochen in 5 Phasen. Tippe eine Woche an, um die Übungen zu sehen.</p>
-    <div class="card"><h3>Wochenrhythmus</h3><ul class="plain small"><li><b>Mo, Mi, Fr:</b> Kraft A, B, C (45–55 Min.)</li><li><b>Di, Do:</b> Mobility vertiefen (20 Min.)</li><li><b>Sa:</b> Spaziergang mit deinem Sohn, Mobility</li><li><b>So:</b> frei</li></ul>
+    ${planRunCard()}<div class="card"><h3>Wochenrhythmus</h3><ul class="plain small"><li><b>Mo, Mi, Fr:</b> Kraft A, B, C (45–55 Min.)</li><li><b>Di, Do:</b> Mobility vertiefen (20 Min.)</li><li><b>Sa:</b> Spaziergang mit deinem Sohn, Mobility</li><li><b>So:</b> frei</li></ul>
     <p class="small muted">Tage sind verschiebbar. Die App schlägt immer das nächste Training in der Reihenfolge A, B, C vor.</p><div class="row" style="flex-wrap:wrap"><button class="btn ghost sm" data-a="tab2" data-v="mobility">Alle Mobility-Routinen</button><button class="btn ghost sm" data-a="guide">Technik und Gewicht</button></div></div>`;
   for(const p of PLAN.phases){
     h += `<div class="phase"><h3>${p.i}. ${p.name} <span class="muted small" style="font-family:var(--body);font-weight:600">Woche ${p.w[0]}–${p.w[1]} · Reserve ${p.rir}</span></h3><p class="small muted" style="margin:4px 0 0">${esc(p.focus)}</p><div class="weeks">`;
@@ -501,6 +512,78 @@ function vPlan(){
     h += '</div></div>';
   }
   return h + '</div>';
+}
+function planRunCard(){
+  const w = currentWeek();
+  const lag = S.pause ? '' : S.shift>0 ? ` Der Plan liegt ${S.shift} Woche${S.shift===1?'':'n'} hinter dem Kalender.` : S.shift<0 ? ` Der Plan liegt ${-S.shift} Woche${S.shift===-1?'':'n'} vor dem Kalender.` : '';
+  return `<div class="card stripe cM"><h3>Planlauf</h3>${UI.toast?`<div class="banner good">${UI.toast}</div>`:''}<p class="small">Du bist in <b>Woche ${w}</b>${S.pause?' (pausiert seit '+fmtDate(S.pause.since)+')':''}.${lag}</p>
+    <div class="row" style="flex-wrap:wrap">${S.pause ? '<button class="btn" data-a="pauseend">Pause beenden</button>' : '<button class="btn" data-a="pausestart">Plan pausieren</button>'}<button class="btn ghost" data-a="weekback">Woche wiederholen</button><button class="btn ghost" data-a="weekfwd">Woche überspringen</button></div>
+    <p class="small muted" style="margin:8px 0 0">Pausieren friert den Plan ein, zum Beispiel bei Krankheit oder Urlaub. Beim Beenden machst du in derselben Planwoche weiter. „Woche wiederholen“ setzt dich eine Planwoche zurück, „überspringen“ eine vor. Deine bisherigen Trainings bleiben erhalten.</p></div>`;
+}
+function adjustWeek(d){
+  if(S.pause){ const nw = S.pause.week - d; if(nw<1 || nw>24){ alert('Weiter geht es in diese Richtung nicht.'); return false; } S.pause.week = nw; return true; }
+  if(calNow()<1){ alert('Der Plan hat noch nicht begonnen.'); return false; }
+  const nw = calNow() - (S.shift + d); if(nw<1 || nw>24){ alert('Weiter geht es in diese Richtung nicht.'); return false; }
+  S.shift += d; return true;
+}
+/* ---------- Wochenrückblick ---------- */
+const calStart = c => { const m = mondayOf(parseYmd(S.start)); m.setDate(m.getDate() + (c-1)*7); return m; };
+const calRange = c => { const a = calStart(c), b = new Date(a); b.setDate(a.getDate()+6); return fmtDate(ymd(a))+' bis '+fmtDate(ymd(b)); };
+const avgOf = a => a.length ? a.reduce((s,v) => s+v, 0)/a.length : null;
+function weekData(c){
+  const ses = S.sessions.filter(x => monRel(x.date)===c), steps = S.body.filter(x => x.steps!=null && monRel(x.date)===c).map(x => x.steps), kgs = S.body.filter(x => x.kg!=null && monRel(x.date)===c).map(x => x.kg);
+  return {c, ses, vol:ses.reduce((t,x) => t + volOf(x.sets), 0), mobs:S.mobs.filter(x => monRel(x.date)===c).length,
+    stepAvg:avgOf(steps), stepN:steps.length, stepGoalDays:steps.filter(v => v>=S.cfg.steps).length, kgAvg:avgOf(kgs), kgN:kgs.length, prs:prEvents().filter(p => monRel(p.date)===c)};
+}
+function advice(c){
+  const pts = []; for(let k=Math.max(1,c-3); k<=c; k++){ const d = weekData(k); if(d.kgAvg!==null) pts.push({c:k, kg:d.kgAvg}); }
+  const kc = calories();
+  if(pts.length<2) return {tone:'dl', text:'Für eine Empfehlung brauche ich Wiegungen aus mindestens zwei Wochen. Wiege dich 2 bis 3 Mal pro Woche morgens nach dem Toilettengang und trage das Gewicht auf der Heute-Seite ein.'};
+  const f = pts[0], l = pts[pts.length-1], wks = l.c - f.c, rate = (f.kg - l.kg)/wks;
+  const dl = Math.abs(f.kg-l.kg), rt = dl<0.1 ? `Dein Wochenschnitt ist in ${wks} Woche${wks===1?'':'n'} praktisch gleich geblieben.` : `Dein Wochenschnitt ging in ${wks} Woche${wks===1?'':'n'} um ${fmt1(dl)} kg ${f.kg>=l.kg?'runter':'hoch'} (ca. ${fmtN(Math.round(Math.abs(rate)*100)/100)} kg pro Woche).`;
+  if(latestKg() <= S.cfg.goal) return {tone:'good', text: rt+' Du hast dein Zielgewicht erreicht. Hebe die Kalorien auf etwa '+fmtInt(kc.tdee)+' kcal an und steigere weiter die Kraft.'};
+  if(pts.length<3) return {tone:'dl', text: rt+' Für eine Anpassung ist es noch zu früh. Warte, bis Wiegungen aus drei Wochen vorliegen.'};
+  const wl = S.body.filter(x => x.waist!=null).sort((a,b) => a.date<b.date?-1:1), waistDown = wl.length>=2 && wl[wl.length-1].waist < wl[wl.length-2].waist - 0.3;
+  if(rate<0.2) return waistDown
+    ? {tone:'dl', text: rt+' Deine Taille ist aber kleiner geworden. Beim Muskelaufbau stagniert die Waage oft. Bleib noch eine Woche dabei und schau dann wieder.'}
+    : {tone:'warn', text: rt+' Das liegt unter dem Ziel von 0,25 bis 0,5 kg pro Woche. Senke die Kalorien um etwa 150 auf '+fmtInt(kc.lo-150)+'–'+fmtInt(kc.hi-150)+' kcal oder geh etwa 1.500 Schritte pro Tag mehr.'};
+  if(rate>0.7) return {tone:'warn', text: rt+' Das ist schneller als empfohlen und kann Muskeln kosten. Erhöhe die Kalorien um etwa 150 auf '+fmtInt(kc.lo+150)+'–'+fmtInt(kc.hi+150)+' kcal.'};
+  return {tone:'good', text: rt+' Das liegt im Zielbereich. Du musst nichts ändern.'};
+}
+const revDefault = () => calNow()>=2 ? calNow()-1 : Math.max(calNow(),1);
+function reviewText(c){
+  const d = weekData(c), a = advice(c);
+  return ['Wochenrückblick '+calRange(c), d.ses.length+' von 3 Trainings, '+d.mobs+' Mobility', d.prs.length+' Rekord'+(d.prs.length===1?'':'e')+', '+fmtInt(d.vol)+' kg bewegt',
+    d.stepAvg!==null ? 'Ø '+fmtInt(d.stepAvg)+' Schritte' : 'Keine Schritte eingetragen', d.kgAvg!==null ? 'Ø Gewicht '+fmt1(d.kgAvg)+' kg' : 'Keine Wiegung', a.text].join('\n');
+}
+function vReview(){
+  const cn = calNow();
+  let h = `<div class="top"><div class="in"><button class="iconbtn" data-a="tab" data-v="progress" aria-label="Zurück">${ICON.back}</button><h2>Wochenrückblick</h2></div></div><div class="wrap">`;
+  if(cn<1) return h + `<p class="muted">Dein Plan beginnt am ${fmtDate(S.start)}. Danach findest du hier jede Woche eine Zusammenfassung.</p></div>`;
+  const c = Math.min(Math.max(UI.rev ?? revDefault(), 1), cn), d = weekData(c), p = c>1 ? weekData(c-1) : null;
+  h += `<div class="row sp" style="margin-bottom:10px"><button class="iconbtn" data-a="revnav" data-d="-1" ${c<=1?'disabled style="opacity:.4"':''} aria-label="Vorherige Woche">${ICON.back}</button><div style="text-align:center"><b style="font-family:var(--head);font-size:1.35rem">${calRange(c)}</b><div class="small muted">${c===cn?'Diese Woche (bisher)':'Woche '+c+' seit Start'}</div></div><button class="iconbtn" data-a="revnav" data-d="1" ${c>=cn?'disabled style="opacity:.4;transform:scaleX(-1)"':'style="transform:scaleX(-1)"'} aria-label="Nächste Woche">${ICON.back}</button></div>`;
+  const volPct = p && p.vol>0 && d.vol>0 ? Math.round((d.vol/p.vol-1)*100) : null;
+  h += `<div class="hero"><div class="stat cA"><b>${d.ses.length}</b><span>von 3 Trainings</span><em>${d.mobs} Mobility-Einheit${d.mobs===1?'':'en'}</em></div>
+    <div class="stat cB"><b>${d.prs.length}</b><span>Rekord${d.prs.length===1?'':'e'}</span><em>${d.prs.length?'siehe Highlights':'ab dem 2. Mal je Übung'}</em></div>
+    <div class="stat cC"><b>${d.vol>=10000?fmt1(d.vol/1000)+' t':fmtInt(d.vol)}</b><span>${d.vol>=10000?'bewegt':'kg bewegt'}</span><em>${volPct===null?'&nbsp;':(volPct>=0?'+':'−')+Math.abs(volPct)+' % zur Vorwoche'}</em></div>
+    <div class="stat cX"><b>${d.stepAvg===null?'–':fmtInt(d.stepAvg)}</b><span>Ø Schritte</span><em>${d.stepN?d.stepN+' Tag'+(d.stepN===1?'':'e')+' eingetragen':'keine Einträge'}</em></div></div>`;
+  const hl = [];
+  if(d.ses.length>=3) hl.push('Alle 3 Trainings geschafft.'); else if(d.ses.length===2) hl.push('2 von 3 Trainings, eine solide Woche.'); else if(d.ses.length===1) hl.push('1 Training, ein Anfang ist gemacht.');
+  d.prs.slice(0,4).forEach(x => hl.push(exOf(x.id).n+': '+fmtSet(x.id,x.s)+' (+'+Math.round(x.pct*100)+' %)'));
+  if(d.stepGoalDays>=3) hl.push(d.stepGoalDays+' Tage mit erreichtem Schrittziel.');
+  if(p && p.stepAvg!==null && d.stepAvg!==null && d.stepAvg>p.stepAvg*1.05) hl.push('Schritte: +'+fmtInt(d.stepAvg-p.stepAvg)+' pro Tag gegenüber der Vorwoche.');
+  if(volPct!==null && volPct>=5) hl.push('Mehr bewegtes Gewicht als in der Vorwoche (+'+volPct+' %).');
+  h += `<div class="card stripe cC"><h3>Highlights</h3>${hl.length ? `<ul class="plain small" style="margin:0">${hl.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<p class="small muted" style="margin:0">Aus dieser Woche gibt es noch nichts einzutragen.</p>'}</div>`;
+  h += `<div class="card"><h3>Schritte</h3>${d.stepAvg===null ? '<p class="small muted" style="margin:0">Keine Schritte eingetragen. Trage sie abends auf der Heute-Seite ein.</p>' : `<div class="goal"><div class="lbl"><span>Ø ${fmtInt(d.stepAvg)} pro Tag</span><span>Ziel ${fmtInt(S.cfg.steps)}</span></div><div class="bar" style="--c:var(--pA)"><i style="width:${Math.min(100,d.stepAvg/S.cfg.steps*100)}%"></i></div></div><p class="small muted" style="margin:4px 0 0">${p && p.stepAvg!==null ? 'Vorwoche: Ø '+fmtInt(p.stepAvg)+'.' : ''}</p>`}</div>`;
+  const wl2 = S.body.filter(x => x.waist!=null).sort((a,b) => a.date<b.date?-1:1);
+  h += `<div class="card"><h3>Gewicht</h3>${d.kgAvg===null ? '<p class="small muted" style="margin:0">Keine Wiegung in dieser Woche.</p>' : `<p style="margin:0"><b style="font-family:var(--head);font-size:1.6rem">Ø ${fmt1(d.kgAvg)} kg</b> <span class="small muted">aus ${d.kgN} Wiegung${d.kgN===1?'':'en'}</span></p>${p && p.kgAvg!==null ? `<p class="small ${p.kgAvg>d.kgAvg?'up':'muted'}" style="margin:4px 0 0">${p.kgAvg>=d.kgAvg?'−':'+'}${fmt1(Math.abs(p.kgAvg-d.kgAvg))} kg gegenüber der Vorwoche (Ø ${fmt1(p.kgAvg)} kg)</p>` : ''}`}${wl2.length ? `<p class="small muted" style="margin:6px 0 0">Letzte Taillenmessung: ${fmtN(wl2[wl2.length-1].waist)} cm (${fmtDate(wl2[wl2.length-1].date)})</p>` : ''}</div>`;
+  const ad = advice(c);
+  h += `<div class="banner ${ad.tone==='good'?'good':ad.tone==='dl'?'dl':''}"><b>Empfehlung</b><br>${esc(ad.text)}</div>`;
+  const nextW = c===cn ? currentWeek()+1 : currentWeek();
+  if(nextW>=1 && nextW<=24){ const wi = wkInfo(nextW), ph = phaseOf(nextW);
+    h += `<div class="card"><h3>${c===cn?'Nächste Planwoche':'Aktuelle Planwoche'}: Woche ${nextW}</h3><p class="small" style="margin:0">Phase ${ph.i}: ${ph.name}, Reserve ${wi.rir}.${wi.deload?' <b>Entlastungswoche:</b> 2 Sätze, Gewichte etwas leichter.':''}</p></div>`; }
+  h += `<button class="btn ghost full" data-a="revshare">Zusammenfassung teilen</button></div>`;
+  return h;
 }
 function vWeek(n){
   const wi = wkInfo(n), ph = phaseOf(n);
@@ -901,7 +984,7 @@ function lineChart(points, opts={}){
 }
 function vProgress(){
   const st = stats(), ser = bodySeries(), goalKg = S.cfg.goal, startKg = S.cfg.startKg;
-  let h = `<div class="wrap">${banner()}<h1>Fortschritt</h1>`;
+  let h = `<div class="wrap">${banner()}<h1>Fortschritt</h1><div class="row" style="margin:8px 0 0"><button class="btn ghost sm" data-a="review">Wochenrückblick</button></div>`;
   if(st.n===0 && S.body.length===0) h += `<p class="muted">Hier siehst du, wie du stärker und leichter wirst. Nach dem ersten Training und der ersten Wiegung füllt sich diese Seite.</p>`;
   h += `<div class="hero">
     <div class="stat cA"><b>${st.n}</b><span>Trainings</span><em>${st.streak.cur>0?st.streak.cur+' Woche'+(st.streak.cur===1?'':'n')+' in Folge (mind. 2)':'Serie startet mit 2 pro Woche'}</em></div>
@@ -1102,6 +1185,26 @@ document.addEventListener('click', e => {
   else if(a==='flt'){ UI.flt[b.dataset.f] = !UI.flt[b.dataset.f]; render(); }
   else if(a==='fopen'){ UI.fOpen = !UI.fOpen; render(); }
   else if(a==='fclear'){ UI.tags = []; UI.q = ''; UI.flt = {}; render(); }
+  else if(a==='review'){ UI.rev = null; S.reviewSeen = Math.max(S.reviewSeen||0, Math.max(0, calNow()-1)); save(); setView('review'); }
+  else if(a==='revnav'){ const cn = calNow(), c = Math.min(Math.max(UI.rev ?? revDefault(), 1), cn); UI.rev = Math.min(cn, Math.max(1, c + (+b.dataset.d))); render(); window.scrollTo(0,0); }
+  else if(a==='revshare'){
+    const cn = calNow(), c = Math.min(Math.max(UI.rev ?? revDefault(), 1), cn), t = reviewText(c);
+    if(navigator.share){ navigator.share({title:'Wochenrückblick', text:t}).catch(()=>{}); }
+    else if(navigator.clipboard){ navigator.clipboard.writeText(t).then(() => alert('Zusammenfassung kopiert.')).catch(()=>alert(t)); }
+    else alert(t);
+  }
+  else if(a==='pausestart'){
+    if(calNow()<1){ alert('Der Plan hat noch nicht begonnen.'); return; }
+    S.pause = {since:ymd(new Date()), week:currentWeek()}; UI.toast = 'Plan pausiert. Du bleibst in Woche '+S.pause.week+'.'; save(); render();
+  }
+  else if(a==='pauseend'){
+    const el = Math.max(0, Math.round((mondayOf(new Date()) - mondayOf(parseYmd(S.pause.since))) / (7*864e5)));
+    S.shift += el; S.pause = null; S.dismissWeek = calNow(); UI.toast = 'Pause beendet. Du machst in Woche '+currentWeek()+' weiter.'; save(); render();
+  }
+  else if(a==='weekback' || a==='weekfwd'){
+    if(adjustWeek(a==='weekback' ? 1 : -1)){ S.dismissWeek = calNow(); UI.toast = 'Du bist jetzt in Woche '+currentWeek()+'.'; save(); render(); }
+  }
+  else if(a==='weekkeep'){ S.dismissWeek = calNow(); save(); render(); }
   else if(a==='pl+' || a==='pl-'){ const k = String(parseFloat(b.dataset.w)); S.plates[k] = Math.max(0, (S.plates[k]||0) + (a==='pl+' ? 1 : -1)); if(!S.plates[k]) delete S.plates[k]; save(); render(); }
   else if(a==='pladd'){
     const w = num($('#plw').value), c = Math.round(num($('#plc').value)||1);
